@@ -54,8 +54,8 @@ class DivWorkPool;
 
 #define DIV_UNSTABLE
 
-#define DIV_VERSION "Another undercooked furnace update"
-#define DIV_ENGINE_VERSION 214
+#define DIV_VERSION "Import Test"
+#define DIV_ENGINE_VERSION 216
 // for imports
 #define DIV_VERSION_MOD 0xff01
 #define DIV_VERSION_FC 0xff02
@@ -137,6 +137,7 @@ struct DivChannelState {
   int delayOrder, delayRow, retrigSpeed, retrigTick;
   int vibratoDepth, vibratoRate, vibratoPos, vibratoPosGiant, vibratoShape, vibratoFine;
   int tremoloDepth, tremoloRate, tremoloPos;
+  int panDepth, panRate, panPos, panSpeed;
   int sampleOff;
   unsigned char arp, arpStage, arpTicks, panL, panR, panRL, panRR, lastVibrato, lastPorta, cutType;
   bool doNote, legato, portaStop, keyOn, keyOff, nowYouCanStop, stopOnOff, releasing;
@@ -174,6 +175,10 @@ struct DivChannelState {
     tremoloDepth(0),
     tremoloRate(0),
     tremoloPos(0),
+    panDepth(0),
+    panRate(0),
+    panPos(0),
+    panSpeed(0),
     sampleOff(0),
     arp(0),
     arpStage(-1),

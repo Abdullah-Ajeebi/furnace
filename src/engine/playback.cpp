@@ -686,6 +686,31 @@ void DivEngine::processRow(int i, bool afterDelay) {
         chan[i].panR=effectVal;
         panChanged=true;
         break;
+      case 0x83: // pan slide
+        if (effectVal!=0) {
+          if ((effectVal&15)!=0) {
+            chan[i].panSpeed=(effectVal&15);
+          } else {
+            chan[i].panSpeed=-(effectVal>>4);
+          }
+          // panbrello and slides are incompatible
+          chan[i].panDepth=0;
+          chan[i].panRate=0;
+          chan[i].panPos=0;
+        } else {
+          chan[i].panSpeed=0;
+        }
+        break;
+      case 0x84: // panbrello
+        if (chan[i].panDepth==0) {
+          chan[i].panPos=0;
+        }
+        chan[i].panDepth=effectVal&15;
+        chan[i].panRate=effectVal>>4;
+        if (chan[i].panDepth!=0) {
+          chan[i].panSpeed=0;
+        }
+        break;
       case 0x88: // panning rear (split 4-bit)
         chan[i].panRL=(effectVal>>4)|(effectVal&0xf0);
         chan[i].panRR=(effectVal&15)|((effectVal&15)<<4);
@@ -1039,26 +1064,6 @@ void DivEngine::processRow(int i, bool afterDelay) {
         clockDrift=0;
         subticks=0;
         break;
-      case 0xf1: // single pitch ramp up
-      case 0xf2: // single pitch ramp down
-        if (effect==0xf1) {
-          chan[i].portaNote=song.limitSlides?0x60:255;
-        } else {
-          chan[i].portaNote=song.limitSlides?disCont[dispatchOfChan[i]].dispatch->getPortaFloor(dispatchChanOfChan[i]):-60;
-        }
-        chan[i].portaSpeed=effectVal;
-        chan[i].portaStop=true;
-        chan[i].nowYouCanStop=false;
-        chan[i].stopOnOff=false;
-        chan[i].scheduledSlideReset=false;
-        chan[i].inPorta=false;
-        if (!song.arpNonPorta) dispatchCmd(DivCommand(DIV_CMD_PRE_PORTA,i,true,0));
-        dispatchCmd(DivCommand(DIV_CMD_NOTE_PORTA,i,chan[i].portaSpeed*(song.linearPitch==2?song.pitchSlideSpeed:1),chan[i].portaNote));
-        chan[i].portaNote=-1;
-        chan[i].portaSpeed=-1;
-        chan[i].inPorta=false;
-        if (!song.arpNonPorta) dispatchCmd(DivCommand(DIV_CMD_PRE_PORTA,i,false,0));
-        break;
       case 0xf3: // fine volume ramp up
         // tremolo and vol slides are incompatible
         chan[i].tremoloDepth=0;
@@ -1198,7 +1203,30 @@ void DivEngine::processRow(int i, bool afterDelay) {
 
     if (effectVal==-1) effectVal=0;
     effectVal&=255;
-    perSystemPostEffect(i,effect,effectVal);
+    if (!perSystemPostEffect(i,effect,effectVal)) {
+      switch (effect) {
+        case 0xf1: // single pitch ramp up
+        case 0xf2: // single pitch ramp down
+          if (effect==0xf1) {
+            chan[i].portaNote=song.limitSlides?0x60:255;
+          } else {
+            chan[i].portaNote=song.limitSlides?disCont[dispatchOfChan[i]].dispatch->getPortaFloor(dispatchChanOfChan[i]):-60;
+          }
+          chan[i].portaSpeed=effectVal;
+          chan[i].portaStop=true;
+          chan[i].nowYouCanStop=false;
+          chan[i].stopOnOff=false;
+          chan[i].scheduledSlideReset=false;
+          chan[i].inPorta=false;
+          if (!song.arpNonPorta) dispatchCmd(DivCommand(DIV_CMD_PRE_PORTA,i,true,0));
+          dispatchCmd(DivCommand(DIV_CMD_NOTE_PORTA,i,chan[i].portaSpeed*(song.linearPitch==2?song.pitchSlideSpeed:1),chan[i].portaNote));
+          chan[i].portaNote=-1;
+          chan[i].portaSpeed=-1;
+          chan[i].inPorta=false;
+          if (!song.arpNonPorta) dispatchCmd(DivCommand(DIV_CMD_PRE_PORTA,i,false,0));
+          break;
+      }
+    }
   }
 }
 
@@ -1533,11 +1561,14 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
       }
       // process stuff
       if (!shallStop) for (int i=0; i<chans; i++) {
+        // delay effects
         if (chan[i].rowDelay>0) {
           if (--chan[i].rowDelay==0) {
             processRow(i,true);
           }
         }
+
+        // retrigger
         if (chan[i].retrigSpeed) {
           if (--chan[i].retrigTick<0) {
             chan[i].retrigTick=chan[i].retrigSpeed-1;
@@ -1545,6 +1576,8 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
             keyHit[i]=true;
           }
         }
+
+        // volume slides and tremolo
         if (!song.noSlidesOnFirstTick || !firstTick) {
           if (chan[i].volSpeed!=0) {
             chan[i].volume=(chan[i].volume&0xff)|(dispatchCmd(DivCommand(DIV_CMD_GET_VOLUME,i))<<8);
@@ -1574,6 +1607,63 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
             dispatchCmd(DivCommand(DIV_CMD_VOLUME,i,MAX(0,chan[i].volume-(tremTable[chan[i].tremoloPos]*chan[i].tremoloDepth))>>8));
           }
         }
+
+        // panning slides
+        if (chan[i].panSpeed!=0) {
+          int newPanL=chan[i].panL;
+          int newPanR=chan[i].panR;
+          logV("panSpeed: %d",chan[i].panSpeed);
+          if (chan[i].panSpeed>0) { // right
+            if (newPanR>=0xff) {
+              newPanL-=chan[i].panSpeed;
+            } else {
+              newPanR+=chan[i].panSpeed;
+            }
+          } else { // left
+            if (newPanL>=0xff) {
+              newPanR+=chan[i].panSpeed;
+            } else {
+              newPanL-=chan[i].panSpeed;
+            }
+          }
+
+          if (newPanL<0) newPanL=0;
+          if (newPanL>0xff) newPanL=0xff;
+          if (newPanR<0) newPanR=0;
+          if (newPanR>0xff) newPanR=0xff;
+
+          chan[i].panL=newPanL;
+          chan[i].panR=newPanR;
+
+          dispatchCmd(DivCommand(DIV_CMD_PANNING,i,chan[i].panL,chan[i].panR));
+        } else if (chan[i].panDepth>0) {
+          chan[i].panPos+=chan[i].panRate;
+          chan[i].panPos&=255;
+
+          // calculate...
+          switch (chan[i].panPos&0xc0) {
+            case 0: // center -> right
+              chan[i].panL=0xff-((chan[i].panPos&0x3f)<<2);
+              chan[i].panR=0xff;
+              break;
+            case 0x40: // right -> center
+              chan[i].panL=(chan[i].panPos&0x3f)<<2;
+              chan[i].panR=0xff;
+              break;
+            case 0x80: // center -> left
+              chan[i].panL=0xff;
+              chan[i].panR=0xff-((chan[i].panPos&0x3f)<<2);
+              break;
+            case 0xc0: // left -> center
+              chan[i].panL=0xff;
+              chan[i].panR=(chan[i].panPos&0x3f)<<2;
+              break;
+          }
+
+          dispatchCmd(DivCommand(DIV_CMD_PANNING,i,chan[i].panL,chan[i].panR));
+        }
+
+        // vibrato
         if (chan[i].vibratoDepth>0) {
           chan[i].vibratoPos+=chan[i].vibratoRate;
           while (chan[i].vibratoPos>=64) chan[i].vibratoPos-=64;
@@ -1629,6 +1719,8 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
           }
           dispatchCmd(DivCommand(DIV_CMD_PITCH,i,chan[i].pitch+(((chan[i].vibratoDepth*vibratoOut*chan[i].vibratoFine)>>4)/15)));
         }
+
+        // delayed legato
         if (chan[i].legatoDelay>0) {
           if (--chan[i].legatoDelay<1) {
             chan[i].note+=chan[i].legatoTarget;
@@ -1638,6 +1730,8 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
             chan[i].legatoTarget=0;
           }
         }
+
+        // portamento and pitch slides
         if (!song.noSlidesOnFirstTick || !firstTick) {
           if ((chan[i].keyOn || chan[i].keyOff) && chan[i].portaSpeed>0) {
             if (dispatchCmd(DivCommand(DIV_CMD_NOTE_PORTA,i,chan[i].portaSpeed*(song.linearPitch==2?song.pitchSlideSpeed:1),chan[i].portaNote))==2 && chan[i].portaStop && song.targetResetsSlides) {
@@ -1651,6 +1745,8 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
             }
           }
         }
+
+        // note cut
         if (chan[i].cut>0) {
           if (--chan[i].cut<1) {
             if (chan[i].cutType==2) {
@@ -1685,6 +1781,8 @@ bool DivEngine::nextTick(bool noAccum, bool inhibitLowLat) {
             }
           }
         }
+
+        // arpeggio
         if (chan[i].resetArp) {
           dispatchCmd(DivCommand(DIV_CMD_LEGATO,i,chan[i].note));
           dispatchCmd(DivCommand(DIV_CMD_HINT_LEGATO,i,chan[i].note));
