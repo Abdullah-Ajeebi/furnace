@@ -165,6 +165,51 @@ bool DivEngine::getIsFadingOut() {
     } \
   }
 
+void applyExportMetadata(SNDFILE* sf, const DivSong& song, DivAudioExportModes mode, int index = 0) {
+  if (sf == nullptr) return;
+
+  // 1. TITLE
+  String titleStr = song.name;
+  if (titleStr.empty()) titleStr = "Untitled";
+
+  if (mode == DIV_EXPORT_MODE_MANY_CHAN) {
+    titleStr += fmt::sprintf(" (Channel %d)", index + 1);
+  } else if (mode == DIV_EXPORT_MODE_MANY_SYS) {
+    titleStr += fmt::sprintf(" (System %d)", index + 1);
+  }
+  sf_set_string(sf, SF_STR_TITLE, titleStr.c_str());
+
+  // 2. ARTIST / COMPOSER
+  if (!song.author.empty()) {
+    sf_set_string(sf, SF_STR_ARTIST, song.author.c_str());
+  } else if (!song.composer.empty()) {
+    sf_set_string(sf, SF_STR_ARTIST, song.composer.c_str());
+  }
+
+  // 3. ALBUM / GAME NAME
+  if (!song.category.empty()) {
+    sf_set_string(sf, SF_STR_ALBUM, song.category.c_str());
+  }
+
+  // 4. TRACK NUMBER
+  if (mode == DIV_EXPORT_MODE_MANY_CHAN || mode == DIV_EXPORT_MODE_MANY_SYS) {
+    sf_set_string(sf, SF_STR_TRACKNUMBER, fmt::sprintf("%d", index + 1).c_str());
+  }
+
+  // 5. GENRE
+  sf_set_string(sf, SF_STR_GENRE, "Chiptune");
+
+  // 6. DATE & COPYRIGHT
+  if (!song.createdDate.empty()) sf_set_string(sf, SF_STR_DATE, song.createdDate.c_str());
+  if (!song.copyright.empty()) sf_set_string(sf, SF_STR_COPYRIGHT, song.copyright.c_str());
+
+  // 7. COMMENTS / NOTES
+  if (!song.notes.empty()) sf_set_string(sf, SF_STR_COMMENT, song.notes.c_str());
+
+  // 8. SOFTWARE STAMP
+  sf_set_string(sf, SF_STR_SOFTWARE, "Furnace Tracker");
+}
+
 void DivEngine::runExportThread() {
   size_t fadeOutSamples=got.rate*exportFadeOut;
   size_t curFadeOutSample=0;
@@ -216,6 +261,8 @@ void DivEngine::runExportThread() {
         exporting=false;
         return;
       }
+
+      applyExportMetadata(sf,song,exportMode,0);
 
       MAP_BITRATE;
 
@@ -307,8 +354,25 @@ void DivEngine::runExportThread() {
         si[i].format=SF_FORMAT_WAV|SF_FORMAT_PCM_16;
       }
 
+      const char* ext = ".wav";
+      switch (exportFormat) {
+        case DIV_EXPORT_FORMAT_FLAC:
+          ext = ".flac";
+          break;
+        case DIV_EXPORT_FORMAT_OPUS:
+        case DIV_EXPORT_FORMAT_VORBIS:
+          ext = ".ogg";
+          break;
+        case DIV_EXPORT_FORMAT_MPEG_L3:
+          ext = ".mp3";
+          break;
+        default:
+          ext = ".wav";
+          break;
+      }
+
       for (int i=0; i<song.systemLen; i++) {
-        fname[i]=fmt::sprintf("%s_s%02d.wav",exportPath,i+1);
+        fname[i]=fmt::sprintf("%s_s%02d%s",exportPath.c_str(),i+1,ext);
         logI("- %s",fname[i].c_str());
         sf[i]=sfWrap[i].doOpen(fname[i].c_str(),SFM_WRITE,&si[i]);
         if (sf[i]==NULL) {
@@ -318,6 +382,7 @@ void DivEngine::runExportThread() {
           }
           return;
         }
+        applyExportMetadata(sf[i],song,exportMode,i);
       }
 
       float* outBuf[DIV_MAX_OUTPUTS];
@@ -424,6 +489,23 @@ void DivEngine::runExportThread() {
       outBufFinal=new float[EXPORT_BUFSIZE*exportOutputs];
 
       logI("rendering to files...");
+
+      const char* ext = ".wav";
+      switch (exportFormat) {
+        case DIV_EXPORT_FORMAT_FLAC:
+          ext = ".flac";
+          break;
+        case DIV_EXPORT_FORMAT_OPUS:
+        case DIV_EXPORT_FORMAT_VORBIS:
+          ext = ".ogg";
+          break;
+        case DIV_EXPORT_FORMAT_MPEG_L3:
+          ext = ".mp3";
+          break;
+        default:
+          ext = ".wav";
+          break;
+      }
       
       for (int i=0; i<song.chans; i++) {
         if (!exportChannelMask[i]) continue;
@@ -432,7 +514,7 @@ void DivEngine::runExportThread() {
         SF_INFO si;
         SFWrapper sfWrap;
         memset(&si,0,sizeof(SF_INFO));
-        String fname=fmt::sprintf("%s_c%02d.wav",exportPath,i+1);
+        String fname = fmt::sprintf("%s_c%02d%s",exportPath.c_str(),i+1,ext);
         logI("- %s",fname.c_str());
         si.samplerate=got.rate;
         si.channels=exportOutputs;
@@ -473,6 +555,8 @@ void DivEngine::runExportThread() {
           logE("could not open file for writing! (%s)",sf_strerror(NULL));
           break;
         }
+
+        applyExportMetadata(sf,song,exportMode,i);
 
         MAP_BITRATE;
 
@@ -613,14 +697,12 @@ bool DivEngine::saveAudio(const char* path, DivAudioExportOptions options) {
   exportFadeOut=options.fadeOut;
   memcpy(exportChannelMask,options.channelMask,DIV_MAX_CHANS*sizeof(bool));
   if (exportMode!=DIV_EXPORT_MODE_ONE) {
-    // remove extension
-    String lowerCase=exportPath;
-    for (char& i: lowerCase) {
-      if (i>='A' && i<='Z') i+='a'-'A';
-    }
-    size_t extPos=lowerCase.rfind(".wav");
-    if (extPos!=String::npos) {
-      exportPath=exportPath.substr(0,extPos);
+    // before, it only checked for .wav
+    size_t dotPos = exportPath.rfind('.');
+    size_t slashPos = exportPath.find_last_of("/\\");
+
+    if (dotPos != String::npos && (slashPos == String::npos || dotPos > slashPos)) {
+      exportPath = exportPath.substr(0, dotPos);
     }
   }
   exporting=true;
